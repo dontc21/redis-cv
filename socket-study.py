@@ -35,23 +35,48 @@ def log_command(line):
 
 
 def load_aof():
-    "服务器启动时候，重放日志以恢复数据"
+    """服务器启动时，重放 AOF 日志恢复数据"""
+
     try:
         with open(AOF_LIFE, "r") as f:
             for line in f:
+
                 line = line.strip()
+
                 if not line:
                     continue
+
                 parts = line.split()
                 cmd = parts[0].upper()
+
                 if cmd == "SET":
                     key, value = parts[1], parts[2]
+
                     expire_at = None
-                    if len(parts) >= 5 and parts[3].upper() == "EX":
-                        expire_at = time.time() + int(parts[4])
-                    store[key] = (value, expire_at)
+
+                    # AOF 中保存的是绝对过期时间
+                    if len(parts) >= 5 and parts[3].upper() == "EXAT":
+                        expire_at = float(parts[4])
+
+                    # 情况1：没有过期时间
+                    if expire_at is None:
+                        store[key] = (value, expire_at)
+
+                    # 情况2：有过期时间，并且现在还没有过期
+                    elif time.time() < expire_at:
+                        store[key] = (value, expire_at)
+
+                    # 情况3：有过期时间，但是已经过期
+                    else:
+                        # 防止这个 key 之前的旧值复活
+                        if key in store:
+                            del store[key]
+
+                        continue
+
                 elif cmd == "DEL":
                     key = parts[1]
+
                     if key in store:
                         del store[key]
     except FileNotFoundError:
@@ -96,7 +121,10 @@ def handle_client(coon, addr):
 
                 with lock:
                     store[key] = (value, expire_at)
-                    log_command(line)
+                    if expire_at is not None:
+                        log_command(f"SET {key} {value} EXAT {expire_at}")
+                    else:
+                        log_command(f"SET {key} {value}")
                 coon.sendall(b"+OK\r\n")
 
             elif cmd == "GET":
@@ -146,8 +174,7 @@ load_aof()
 print(" 等待连接")
 
 while True:
-    load_aof()
-    print("等待连接")
+    
     coon,addr = server.accept()
     t = threading.Thread(target=handle_client, args=(coon, addr))
     t.start()
